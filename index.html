@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MR Flashing</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0b5fff">
+  <style>
+    *{box-sizing:border-box} body{margin:0;font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    header{display:flex;gap:12px;align-items:center;border-bottom:1px solid #ddd;padding:12px;flex-wrap:wrap}
+    header strong{margin-right:8px} nav a{margin-right:10px;color:#0b5fff;text-decoration:none}
+    nav a.active{text-decoration:underline} main{padding:16px}
+    label{display:flex;flex-direction:column;gap:6px;margin-right:8px}
+    input,button{padding:8px;border:1px solid #ccc;border-radius:6px}
+    button{background:#fff;cursor:pointer}
+    .grid{display:grid;gap:8;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+    .card{border:1px solid #ddd;border-radius:8px;padding:12px}
+    img.thumb{width:100%;height:140px;object-fit:contain;background:#fafafa}
+    .row{display:flex;gap:8;flex-wrap:wrap;align-items:center}
+    .hidden{display:none}
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <strong>MR Flashing</strong>
+    <nav>
+      <a href="#draw" id="tab-draw" class="active">Draw</a>
+      <a href="#templates" id="tab-templates">Templates</a>
+      <a href="#orders" id="tab-orders">Orders</a>
+      <a href="#suppliers" id="tab-suppliers">Suppliers</a>
+      <a href="#settings" id="tab-settings">Settings</a>
+    </nav>
+  </header>
+  <main>
+    <!-- Draw -->
+    <section id="page-draw">
+      <h1>Draw Flashing</h1>
+      <div class="grid">
+        <label>Name <input id="name" value="Flashing"></label>
+        <label>Length (mm) <input id="length" type="number" value="2400" min="1"></label>
+        <label>Colour <input id="colour" value="Surfmist"></label>
+        <label>Gauge <input id="gauge" value="0.55"></label>
+      </div>
+      <canvas id="canvas" width="900" height="420" style="border:1px solid #aaa;touch-action:none;max-width:100%;margin-top:12px"></canvas>
+      <div class="row" style="margin-top:12px">
+        <button id="saveTemplate">Save as Template</button>
+        <button id="clearCanvas">Clear</button>
+      </div>
+    </section>
+
+    <!-- Templates -->
+    <section id="page-templates" class="hidden">
+      <h1>Templates</h1>
+      <div id="templatesList" class="grid"></div>
+    </section>
+
+    <!-- Orders -->
+    <section id="page-orders" class="hidden">
+      <h1>Order</h1>
+      <div id="ordersList"></div>
+      <div id="orderActions" class="row hidden" style="margin-top:12px">
+        <button id="sendEmail">Send to Supplier (email)</button>
+        <button id="exportPDF">Export PDF</button>
+        <button id="clearOrder">Clear Order</button>
+        <div style="margin-left:auto;font-weight:600">Total: $<span id="orderTotal">0.00</span></div>
+      </div>
+    </section>
+
+    <!-- Suppliers -->
+    <section id="page-suppliers" class="hidden">
+      <h1>Suppliers</h1>
+      <div class="row">
+        <label>Name <input id="supName" value="My Supplier"></label>
+        <label>Email <input id="supEmail" value="orders@example.com"></label>
+        <button id="addSupplier">Add Supplier</button>
+      </div>
+      <div id="suppliersList" style="margin-top:12px"></div>
+    </section>
+
+    <!-- Settings -->
+    <section id="page-settings" class="hidden">
+      <h1>Settings</h1>
+      <p>Base rate is used for pricing: price = (length in metres) × base rate × gauge factor (0.55 → 1.0, ≥0.7 → 1.2).</p>
+      <label>Base Rate ($/m): <input id="rate" type="number" step="0.1" value="25"></label>
+    </section>
+  </main>
+
+<script>
+// --- Simple store with localStorage persist ---
+const store = {
+  get(){ return JSON.parse(localStorage.getItem('mr-flashing-store') || '{"flashings":[],"order":[],"suppliers":[],"defaultSupplierId":null,"ratePerM":25}'); },
+  set(v){ localStorage.setItem('mr-flashing-store', JSON.stringify(v)); },
+  update(p){ const s=this.get(); this.set({...s, ...p}); },
+};
+
+// --- Tabs ---
+function show(tab){
+  document.querySelectorAll('main section').forEach(s=>s.classList.add('hidden'));
+  document.getElementById('page-'+tab).classList.remove('hidden');
+  document.querySelectorAll('nav a').forEach(a=>a.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  if(tab==='templates') renderTemplates();
+  if(tab==='orders') renderOrders();
+  if(tab==='suppliers') renderSuppliers();
+}
+window.addEventListener('hashchange', ()=> show((location.hash||'#draw').slice(1)));
+show((location.hash||'#draw').slice(1));
+
+// ---- Robust drawing handlers (pointer + touch + mouse) ----
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+ctx.lineWidth = 2;
+ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+let drawing = false;
+function posFromEvent(e){
+  const r = canvas.getBoundingClientRect();
+  if (e.touches && e.touches[0]) {
+    return { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top };
+  }
+  return { x: (e.clientX||0) - r.left, y: (e.clientY||0) - r.top };
+}
+
+function startDraw(e){ drawing = true; const p = posFromEvent(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); }
+function moveDraw(e){ if(!drawing) return; const p = posFromEvent(e); ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault(); }
+function endDraw(e){ drawing = false; e.preventDefault(); }
+
+// Pointer events (newer iPadOS)
+canvas.addEventListener('pointerdown', startDraw, {passive:false});
+canvas.addEventListener('pointermove', moveDraw, {passive:false});
+canvas.addEventListener('pointerup', endDraw, {passive:false});
+canvas.addEventListener('pointerleave', endDraw, {passive:false});
+
+// Touch fallback (older iPad/iOS safari)
+canvas.addEventListener('touchstart', startDraw, {passive:false});
+canvas.addEventListener('touchmove', moveDraw, {passive:false});
+canvas.addEventListener('touchend', endDraw, {passive:false});
+canvas.addEventListener('touchcancel', endDraw, {passive:false});
+
+// Mouse fallback (desktop)
+canvas.addEventListener('mousedown', startDraw);
+canvas.addEventListener('mousemove', moveDraw);
+['mouseup','mouseleave'].forEach(ev=>canvas.addEventListener(ev, endDraw));
+
+document.getElementById('clearCanvas').onclick = ()=> ctx.clearRect(0,0,canvas.width,canvas.height);
+
+document.getElementById('saveTemplate').onclick = ()=> {
+  const s = store.get();
+  const tpl = {
+    id: Date.now().toString(),
+    name: document.getElementById('name').value || 'Flashing',
+    length_mm: parseInt(document.getElementById('length').value||'0'),
+    colour: document.getElementById('colour').value,
+    gauge: document.getElementById('gauge').value,
+    qty: 1,
+    image: canvas.toDataURL('image/png'),
+    notes: ''
+  };
+  s.flashings.unshift(tpl);
+  store.set(s);
+  alert('Saved as template'); location.hash = '#templates'; renderTemplates();
+};
+
+// --- Templates ---
+function renderTemplates(){
+  const s = store.get();
+  const el = document.getElementById('templatesList'); el.innerHTML='';
+  if(s.flashings.length===0){ el.innerHTML = '<p>No templates yet—draw and save first.</p>'; return; }
+  s.flashings.forEach(f=>{
+    const d = document.createElement('div'); d.className='card';
+    d.innerHTML = \`
+      <img class="thumb" src="\${f.image}" alt="\${f.name}">
+      <div style="margin-top:6;font-size:13;opacity:.85">
+        <div><strong>\${f.name}</strong></div>
+        <div>Len: \${f.length_mm}mm • Gauge: \${f.gauge} • Colour: \${f.colour}</div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:8">
+        <button data-id="\${f.id}">Add to Order</button>
+      </div>\`;
+    d.querySelector('button').onclick = ()=> { const s2 = store.get(); const item = {...f, id: f.id + '-order-' + Date.now()}; s2.order.unshift(item); store.set(s2); alert('Added to order'); };
+    el.appendChild(d);
+  });
+}
+
+// --- Orders ---
+function priceFor(o, rate){ const lengthM = (o.length_mm||0)/1000; const gaugeFactor = parseFloat(o.gauge||'0.55')>=0.7 ? 1.2 : 1.0; return +(lengthM*rate*gaugeFactor*(o.qty||1)).toFixed(2); }
+function renderOrders(){
+  const s = store.get(); const cont = document.getElementById('ordersList'); cont.innerHTML='';
+  let total = 0;
+  s.order.forEach(o=> total += priceFor(o, s.ratePerM||25));
+  document.getElementById('orderTotal').textContent = total.toFixed(2);
+  document.getElementById('orderActions').classList.toggle('hidden', s.order.length===0);
+  s.order.forEach(o=>{
+    const row = document.createElement('div'); row.className='row'; row.style='border-bottom:1px solid #eee;padding:8px 0;align-items:center';
+    row.innerHTML = \`
+      <img class="thumb" src="\${o.image}" style="width:120px;height:90px">
+      <div style="flex:1">
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+          <strong style="grid-column:1/-1">\${o.name}</strong>
+          <label>Qty <input data-key="qty" type="number" min="1" value="\${o.qty||1}"></label>
+          <label>Length (mm) <input data-key="length_mm" type="number" min="1" value="\${o.length_mm||0}"></label>
+          <label>Colour <input data-key="colour" value="\${o.colour||''}"></label>
+          <label>Gauge <input data-key="gauge" value="\${o.gauge||''}"></label>
+          <input data-key="notes" placeholder="Notes (drip size, bends…)" value="\${o.notes||''}" style="grid-column:1/-1">
+        </div>
+      </div>
+      <button data-action="remove">Remove</button>\`;
+    row.querySelectorAll('input').forEach(inp=>{
+      inp.onchange = ()=>{ const key=inp.dataset.key; const s2=store.get(); const idx=s2.order.findIndex(i=>i.id===o.id); s2.order[idx][key] = (key==='qty' || key==='length_mm') ? parseInt(inp.value||'0') : inp.value; store.set(s2); renderOrders(); };
+    });
+    row.querySelector('[data-action="remove"]').onclick = ()=>{ const s2=store.get(); s2.order = s2.order.filter(i=>i.id!==o.id); store.set(s2); renderOrders(); };
+    cont.appendChild(row);
+  });
+}
+document.getElementById('clearOrder').onclick = ()=>{ const s=store.get(); s.order=[]; store.set(s); renderOrders(); };
+
+// Email & PDF
+document.getElementById('sendEmail').onclick = ()=>{
+  const s = store.get();
+  const sup = s.suppliers.find(x=>x.id===s.defaultSupplierId) || {};
+  const lines = s.order.map((o,i)=>\`\${i+1}. \${o.name} x\${o.qty} — \${o.length_mm}mm, \${o.colour}, \${o.gauge}\${o.notes? ' — '+o.notes: ''}\`).join('%0D%0A');
+  const body = \`MR Flashing Order:%0D%0A%0D%0A\${lines}%0D%0ATotal: $\${document.getElementById('orderTotal').textContent}\`;
+  location.href = \`mailto:\${sup.email||''}?subject=MR Flashing Order&body=\${body}\`;
+};
+document.getElementById('exportPDF').onclick = ()=>{
+  const { jsPDF } = window.jspdf;
+  const s = store.get(); const doc = new jsPDF({unit:'pt', format:'a4'}); let y=40;
+  doc.setFontSize(16); doc.text('MR Flashing — Order', 40, y); y+=24;
+  s.order.forEach((o,i)=>{
+    doc.setFontSize(12);
+    doc.text(\`\${i+1}. \${o.name}  x\${o.qty}  • \${o.length_mm}mm  • \${o.colour}  • \${o.gauge}\`, 40, y); y+=16;
+    if(o.notes){ doc.text('Notes: '+o.notes, 60, y); y+=16; }
+    if(o.image){ try{ doc.addImage(o.image,'PNG',60,y,180,90); y+=100; }catch(e){} }
+    const total = (function(){ const lengthM=(o.length_mm||0)/1000; const rate=s.ratePerM||25; const gf=parseFloat(o.gauge||'0.55')>=0.7?1.2:1.0; return +(lengthM*rate*gf*(o.qty||1)).toFixed(2); })();
+    doc.text('Line total: $'+total.toFixed(2), 60, y); y+=24;
+    if(y>760){ doc.addPage(); y=40; }
+  });
+  const total=parseFloat(document.getElementById('orderTotal').textContent||'0'); doc.setFontSize(14); doc.text('TOTAL: $'+total.toFixed(2),40,y+10);
+  doc.save('MR-Flashing-Order.pdf');
+};
+
+// Suppliers
+function renderSuppliers(){
+  const s = store.get(); const list = document.getElementById('suppliersList'); list.innerHTML='';
+  if(s.suppliers.length===0){ list.innerHTML='<p>No suppliers yet.</p>'; }
+  s.suppliers.forEach(sp=>{
+    const div=document.createElement('div'); div.className='row'; div.style='padding:6px 0;border-bottom:1px solid #eee;align-items:center';
+    div.innerHTML=\`
+      <div style="flex:1"><strong>\${sp.name}</strong> — \${sp.email}</div>
+      <button data-act="default">\${s.defaultSupplierId===sp.id?'Default':'Make Default'}</button>
+      <button data-act="remove">Remove</button>\`;
+    div.querySelector('[data-act="default"]').onclick = ()=>{ const s2=store.get(); s2.defaultSupplierId=sp.id; store.set(s2); renderSuppliers(); };
+    div.querySelector('[data-act="remove"]').onclick = ()=>{ const s2=store.get(); s2.suppliers=s2.suppliers.filter(x=>x.id!==sp.id); if(s2.defaultSupplierId===sp.id) s2.defaultSupplierId=null; store.set(s2); renderSuppliers(); };
+    list.appendChild(div);
+  });
+}
+document.getElementById('addSupplier').onclick = ()=>{
+  const s = store.get();
+  const sp = { id: Date.now().toString(), name: document.getElementById('supName').value, email: document.getElementById('supEmail').value };
+  s.suppliers.unshift(sp); if(!s.defaultSupplierId) s.defaultSupplierId = sp.id; store.set(s); renderSuppliers();
+};
+
+// Settings
+document.getElementById('rate').onchange = (e)=>{ const s=store.get(); s.ratePerM = parseFloat(e.target.value||'25'); store.set(s); renderOrders(); };
+</script>
+</body>
+</html>
